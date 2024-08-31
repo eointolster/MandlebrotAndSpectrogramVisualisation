@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mandelbrot Music Visualizer with Smooth Spectrogram</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        #audioInput {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 100;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <input type="file" id="audioInput" accept="audio/*">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let scene, camera, renderer, analyser, uniforms, audioTexture;
+        let audioContext, audioSource;
+
+        const audioInput = document.getElementById('audioInput');
+        audioInput.addEventListener('change', handleAudioFile);
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+            camera.position.z = 1;
+
+            renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            audioTexture = new THREE.DataTexture(new Uint8Array(128 * 128), 128, 128, THREE.LuminanceFormat);
+            audioTexture.needsUpdate = true;
+
+            createMandelbrotSet();
+            animate();
+        }
+
+        function handleAudioFile(event) {
+            const file = event.target.files[0];
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                const arrayBuffer = e.target.result;
+
+                if (audioContext) audioContext.close();
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+
+                audioContext.decodeAudioData(arrayBuffer, function(buffer) {
+                    if (audioSource) audioSource.disconnect();
+                    audioSource = audioContext.createBufferSource();
+                    audioSource.buffer = buffer;
+                    audioSource.connect(analyser);
+                    analyser.connect(audioContext.destination);
+                    audioSource.start(0);
+                });
+            };
+
+            reader.readAsArrayBuffer(file);
+        }
+
+        function createMandelbrotSet() {
+            const geometry = new THREE.PlaneGeometry(2, 2);
+            
+            const fragmentShader = `
+uniform float time;
+uniform sampler2D audioTexture;
+uniform vec2 resolution;
+
+vec3 hsv2rgb(vec3 c) {
+    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+float mandelbrot(vec2 c) {
+    vec2 z = vec2(0.0);
+    for (int i = 0; i < 100; i++) {
+        z = vec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
+        if (dot(z, z) > 4.0) return float(i) / 100.0;
+    }
+    return 0.0;
+}
+
+void main() {
+    vec2 uv = (gl_FragCoord.xy - 0.5 * resolution.xy) / min(resolution.y, resolution.x);
+    
+    vec2 c = uv * 3.0 - vec2(0.7, 0.0);
+    float m = mandelbrot(c);
+    
+    vec2 spectrogramUV = c + vec2(0.25, 0.0);
+    float radius = length(spectrogramUV);
+    float angle = atan(spectrogramUV.y, spectrogramUV.x);
+    float normalizedAngle = (angle + 3.14159) / (2.0 * 3.14159);
+    
+    if (m == 0.0 && radius < 0.55) {
+        float freq = radius / 0.55;
+        float audioValue = texture2D(audioTexture, vec2(freq, 1.0 - normalizedAngle)).r;
+        vec3 color = hsv2rgb(vec3(freq, 1.0, audioValue));
+        gl_FragColor = vec4(color, 1.0);
+    } else {
+        vec3 color = hsv2rgb(vec3(m + time * 0.1, 1.0, m == 0.0 ? 0.0 : 1.0));
+        gl_FragColor = vec4(color, 1.0);
+    }
+}
+            `;
+
+            uniforms = {
+                time: { value: 0 },
+                audioTexture: { value: audioTexture },
+                resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+            };
+
+            const material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                fragmentShader: fragmentShader
+            });
+
+            const mesh = new THREE.Mesh(geometry, material);
+            scene.add(mesh);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (analyser) {
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                analyser.getByteFrequencyData(dataArray);
+                
+                for (let i = audioTexture.image.data.length - 1; i >= 128; i--) {
+                    audioTexture.image.data[i] = audioTexture.image.data[i - 128];
+                }
+                
+                for (let i = 0; i < 128; i++) {
+                    audioTexture.image.data[i] = dataArray[i];
+                }
+                
+                audioTexture.needsUpdate = true;
+            }
+
+            uniforms.time.value += 0.01;
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+            renderer.setSize(width, height);
+            uniforms.resolution.value.set(width, height);
+        });
+
+        init();
+    </script>
+</body>
+</html>
